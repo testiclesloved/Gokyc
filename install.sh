@@ -55,7 +55,7 @@ EOF
     echo
 }
 
-# Detect operating system
+# Detect operating system (Linux and Termux only)
 detect_os() {
     # Check for Termux first (most reliable method)
     if [[ -n "${TERMUX_VERSION:-}" ]] || [[ -d "/data/data/com.termux" ]] || [[ -n "${PREFIX:-}" && "$PREFIX" == *"com.termux"* ]]; then
@@ -63,31 +63,23 @@ detect_os() {
         return
     fi
     
-    # Check Android without Termux
-    if [[ -d "/system/bin" ]] && [[ -f "/system/build.prop" ]]; then
-        echo "android"
+    # Check if running in Termux environment (additional check)
+    if command -v pkg >/dev/null 2>&1 && [[ -n "${PREFIX:-}" ]]; then
+        echo "termux"
         return
     fi
     
-    # Standard OS detection
+    # Check for standard Linux
     case "$OSTYPE" in
         linux-gnu*|linux-android*)
             echo "linux"
             ;;
-        darwin*)
-            echo "macos"
-            ;;
-        msys*|cygwin*)
-            echo "windows"
-            ;;
         *)
-            # Fallback detection
-            if command -v pkg >/dev/null 2>&1 && [[ -d "$HOME/.termux" ]]; then
-                echo "termux"
-            elif uname -a | grep -qi android; then
-                echo "android"
+            # Final fallback - check for Android
+            if uname -a | grep -qi android || [[ -d "/system/bin" ]]; then
+                echo "termux"  # Assume Termux if Android
             else
-                echo "unknown"
+                echo "unsupported"
             fi
             ;;
     esac
@@ -159,32 +151,17 @@ install_dependencies() {
             fi
             ;;
             
-        "macos")
-            if command_exists brew; then
-                echo -e "${YELLOW}[*] Using Homebrew...${NC}"
-                brew update
-                brew install go git wget unzip
-            else
-                echo -e "${RED}[!] Homebrew not found. Please install Homebrew first.${NC}"
-                echo -e "${CYAN}[*] Visit: https://brew.sh${NC}"
-                exit 1
-            fi
-            ;;
-            
-        "windows")
-            echo -e "${YELLOW}[*] Windows detected (WSL/Cygwin)...${NC}"
-            if command_exists apt-get; then
-                sudo apt-get update
-                sudo apt-get install -y golang git wget unzip openssh-client iproute2 curl
-            else
-                echo -e "${RED}[!] Please install dependencies manually${NC}"
-                echo -e "${CYAN}[*] Required: go, git, wget, unzip, ssh${NC}"
-                exit 1
-            fi
+        "unsupported")
+            echo -e "${RED}[!] Unsupported operating system${NC}"
+            echo -e "${CYAN}[*] GoKYC Ultimate supports Linux and Android (Termux) only${NC}"
+            echo -e "${CYAN}[*] Detected: $os${NC}"
+            echo -e "${CYAN}[*] Please use a supported platform${NC}"
+            exit 1
             ;;
             
         *)
-            echo -e "${RED}[!] Unsupported operating system: $os${NC}"
+            echo -e "${RED}[!] Unknown operating system: $os${NC}"
+            echo -e "${CYAN}[*] GoKYC Ultimate supports Linux and Android (Termux) only${NC}"
             exit 1
             ;;
     esac
