@@ -57,19 +57,40 @@ EOF
 
 # Detect operating system
 detect_os() {
-    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-        if [[ -d "/data/data/com.termux" ]]; then
-            echo "termux"
-        else
-            echo "linux"
-        fi
-    elif [[ "$OSTYPE" == "darwin"* ]]; then
-        echo "macos"
-    elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
-        echo "windows"
-    else
-        echo "unknown"
+    # Check for Termux first (most reliable method)
+    if [[ -n "${TERMUX_VERSION:-}" ]] || [[ -d "/data/data/com.termux" ]] || [[ -n "${PREFIX:-}" && "$PREFIX" == *"com.termux"* ]]; then
+        echo "termux"
+        return
     fi
+    
+    # Check Android without Termux
+    if [[ -d "/system/bin" ]] && [[ -f "/system/build.prop" ]]; then
+        echo "android"
+        return
+    fi
+    
+    # Standard OS detection
+    case "$OSTYPE" in
+        linux-gnu*|linux-android*)
+            echo "linux"
+            ;;
+        darwin*)
+            echo "macos"
+            ;;
+        msys*|cygwin*)
+            echo "windows"
+            ;;
+        *)
+            # Fallback detection
+            if command -v pkg >/dev/null 2>&1 && [[ -d "$HOME/.termux" ]]; then
+                echo "termux"
+            elif uname -a | grep -qi android; then
+                echo "android"
+            else
+                echo "unknown"
+            fi
+            ;;
+    esac
 }
 
 # Check if command exists
@@ -85,11 +106,38 @@ install_dependencies() {
     
     case $os in
         "termux")
-            echo -e "${YELLOW}[*] Updating Termux packages...${NC}"
-            pkg update -y && pkg upgrade -y
+            echo -e "${YELLOW}[*] Termux detected - installing packages...${NC}"
             
-            echo -e "${YELLOW}[*] Installing required packages...${NC}"
-            pkg install -y golang git wget unzip openssh iproute2 curl
+            # Update package lists
+            echo -e "${BLUE}[*] Updating Termux repositories...${NC}"
+            pkg update -y
+            
+            # Install essential packages
+            echo -e "${BLUE}[*] Installing Go compiler...${NC}"
+            pkg install -y golang || {
+                echo -e "${RED}[!] Failed to install golang${NC}"
+                exit 1
+            }
+            
+            echo -e "${BLUE}[*] Installing network tools...${NC}"
+            pkg install -y git wget unzip openssh iproute2 curl || {
+                echo -e "${RED}[!] Failed to install network tools${NC}"
+                exit 1
+            }
+            
+            # Optional but useful packages
+            echo -e "${BLUE}[*] Installing additional tools...${NC}"
+            pkg install -y termux-api netcat-openbsd nmap || {
+                echo -e "${YELLOW}[!] Some optional packages failed to install (continuing)${NC}"
+            }
+            
+            # Set up storage access
+            if [[ ! -d "$HOME/storage" ]]; then
+                echo -e "${BLUE}[*] Setting up storage access...${NC}"
+                termux-setup-storage || {
+                    echo -e "${YELLOW}[!] Storage setup failed (continuing)${NC}"
+                }
+            fi
             ;;
             
         "linux")
@@ -148,13 +196,38 @@ install_dependencies() {
 verify_go() {
     echo -e "${BLUE}[+] Verifying Go installation...${NC}"
     
+    # Check if go command exists
     if ! command_exists go; then
         echo -e "${RED}[!] Go is not installed or not in PATH${NC}"
-        return 1
+        
+        # Try to find Go in common Termux locations
+        local termux_go_paths=("$PREFIX/bin/go" "/data/data/com.termux/files/usr/bin/go")
+        for go_path in "${termux_go_paths[@]}"; do
+            if [[ -x "$go_path" ]]; then
+                echo -e "${YELLOW}[*] Found Go at: $go_path${NC}"
+                export PATH="$(dirname "$go_path"):$PATH"
+                break
+            fi
+        done
+        
+        # Check again
+        if ! command_exists go; then
+            echo -e "${RED}[!] Go installation not found${NC}"
+            return 1
+        fi
     fi
     
-    local go_version=$(go version | awk '{print $3}' | sed 's/go//')
+    # Get version
+    local go_version
+    go_version=$(go version 2>/dev/null | awk '{print $3}' | sed 's/go//' || echo "unknown")
     echo -e "${GREEN}[✓] Go version: $go_version${NC}"
+    
+    # Set Go environment for Termux
+    if [[ "$(detect_os)" == "termux" ]]; then
+        export GOOS=linux
+        export GOARCH=arm64
+        echo -e "${CYAN}[*] Termux Go environment configured${NC}"
+    fi
     
     return 0
 }
@@ -209,35 +282,66 @@ build_application() {
     # Verify essential files exist
     local required_files=("gokyc_ultimate.go" "database.json" "usernamesandpass.txt" "asciiart.txt" "auth.json")
     
+    echo -e "${YELLOW}[*] Checking essential files...${NC}"
     for file in "${required_files[@]}"; do
         if [[ ! -f "$file" ]]; then
             echo -e "${RED}[!] Essential file missing: $file${NC}"
-            exit 1
+            echo -e "${CYAN}[*] Available files:${NC}"
+            ls -la
+            return 1
+        else
+            echo -e "${GREEN}[✓] Found: $file${NC}"
         fi
     done
     
     # Initialize Go module if not exists
     if [[ ! -f "go.mod" ]]; then
         echo -e "${YELLOW}[*] Initializing Go module...${NC}"
-        go mod init github.com/testiclesloved/Gokyc
+        go mod init github.com/testiclesloved/Gokyc || {
+            echo -e "${RED}[!] Failed to initialize Go module${NC}"
+            return 1
+        }
     fi
     
-    # Download dependencies
+    # Download dependencies with verbose output
     echo -e "${YELLOW}[*] Downloading Go dependencies...${NC}"
-    go mod tidy
+    if ! go mod tidy; then
+        echo -e "${RED}[!] Failed to download dependencies${NC}"
+        echo -e "${CYAN}[*] Trying with proxy settings...${NC}"
+        export GOPROXY=https://proxy.golang.org,direct
+        export GOSUMDB=sum.golang.org
+        go mod tidy || {
+            echo -e "${RED}[!] Dependency download failed${NC}"
+            return 1
+        }
+    fi
     
-    # Build the application
+    # Build the application with verbose output
     echo -e "${YELLOW}[*] Compiling GoKYC Ultimate exclusive system...${NC}"
-    if go build -o "$BINARY_NAME" gokyc_ultimate.go; then
+    echo -e "${CYAN}[*] This may take a few minutes...${NC}"
+    
+    if go build -v -o "$BINARY_NAME" gokyc_ultimate.go 2>&1; then
         echo -e "${GREEN}[✓] Build completed successfully${NC}"
     else
         echo -e "${RED}[!] Build failed${NC}"
-        exit 1
+        echo -e "${CYAN}[*] Trying with CGO disabled...${NC}"
+        CGO_ENABLED=0 go build -o "$BINARY_NAME" gokyc_ultimate.go || {
+            echo -e "${RED}[!] Build failed even with CGO disabled${NC}"
+            return 1
+        }
     fi
     
     # Make executable
     chmod +x "$BINARY_NAME"
-    echo -e "${GREEN}[✓] GoKYC Ultimate is ready for exclusive use${NC}"
+    
+    # Verify binary works
+    if [[ -x "$BINARY_NAME" ]]; then
+        echo -e "${GREEN}[✓] GoKYC Ultimate is ready for exclusive use${NC}"
+        return 0
+    else
+        echo -e "${RED}[!] Binary creation failed${NC}"
+        return 1
+    fi
 }
 
 # Create launch script
@@ -331,24 +435,55 @@ main() {
     echo -e "${CYAN}[*] Cyber Family members only - unauthorized access forbidden${NC}"
     echo
     
-    # Detect OS
+    # Detect OS with verbose output
     local os=$(detect_os)
     echo -e "${GREEN}[✓] Detected OS: $os${NC}"
     
-    # Install dependencies
-    install_dependencies "$os"
+    # Show environment info for debugging
+    if [[ "$os" == "termux" ]]; then
+        echo -e "${CYAN}[*] Termux Environment Details:${NC}"
+        echo -e "${CYAN}    TERMUX_VERSION: ${TERMUX_VERSION:-not set}${NC}"
+        echo -e "${CYAN}    PREFIX: ${PREFIX:-not set}${NC}"
+        echo -e "${CYAN}    HOME: $HOME${NC}"
+        echo -e "${CYAN}    PWD: $PWD${NC}"
+    fi
     
-    # Verify Go
-    if ! verify_go; then
-        echo -e "${RED}[!] Go installation verification failed${NC}"
+    # Install dependencies with error handling
+    echo -e "${BLUE}[+] Installing dependencies...${NC}"
+    if ! install_dependencies "$os"; then
+        echo -e "${RED}[!] Dependency installation failed${NC}"
         exit 1
     fi
     
+    # Verify Go with detailed output
+    echo -e "${BLUE}[+] Verifying Go installation...${NC}"
+    if ! verify_go; then
+        echo -e "${RED}[!] Go verification failed${NC}"
+        echo -e "${CYAN}[*] Trying to install Go manually for Termux...${NC}"
+        if [[ "$os" == "termux" ]]; then
+            pkg install -y golang
+            if ! verify_go; then
+                echo -e "${RED}[!] Manual Go installation also failed${NC}"
+                exit 1
+            fi
+        else
+            exit 1
+        fi
+    fi
+    
     # Extract protected release
-    extract_release
+    echo -e "${BLUE}[+] Processing protected release...${NC}"
+    if ! extract_release; then
+        echo -e "${RED}[!] Release extraction failed${NC}"
+        exit 1
+    fi
     
     # Build application
-    build_application
+    echo -e "${BLUE}[+] Building exclusive system...${NC}"
+    if ! build_application; then
+        echo -e "${RED}[!] Build process failed${NC}"
+        exit 1
+    fi
     
     # Create launcher
     create_launcher
@@ -370,10 +505,24 @@ fi
 
 # Verify we're in a git repository with the protected files
 if [[ ! -f "$ZIP_FILE" ]]; then
-    echo -e "${RED}[!] This installer must be run from the cloned GoKYC repository${NC}"
-    echo -e "${CYAN}[*] Please run: git clone https://github.com/testiclesloved/Gokyc.git${NC}"
-    echo -e "${CYAN}[*] Then: cd Gokyc && ./install.sh${NC}"
+    echo -e "${RED}[!] Protected release file not found: $ZIP_FILE${NC}"
+    echo -e "${CYAN}[*] This installer must be run from the cloned GoKYC repository${NC}"
+    echo -e "${CYAN}[*] Installation steps:${NC}"
+    echo -e "${CYAN}    1. git clone https://github.com/testiclesloved/Gokyc.git${NC}"
+    echo -e "${CYAN}    2. cd Gokyc${NC}"
+    echo -e "${CYAN}    3. ./install.sh${NC}"
+    echo
+    echo -e "${YELLOW}[*] Current directory contents:${NC}"
+    ls -la
     exit 1
+fi
+
+# Show file verification
+echo -e "${CYAN}[*] Verified repository files:${NC}"
+echo -e "${GREEN}[✓] install.sh (installer script)${NC}"
+echo -e "${GREEN}[✓] $ZIP_FILE (protected release)${NC}"
+if [[ -f "README.md" ]]; then
+    echo -e "${GREEN}[✓] README.md (documentation)${NC}"
 fi
 
 # Run main installation
