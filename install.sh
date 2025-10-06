@@ -123,6 +123,12 @@ install_dependencies() {
                 echo -e "${YELLOW}[!] Some optional packages failed to install (continuing)${NC}"
             }
             
+            # Install clang for CGO compatibility (if needed)
+            echo -e "${BLUE}[*] Installing build tools for compatibility...${NC}"
+            pkg install -y clang make || {
+                echo -e "${YELLOW}[!] Build tools installation failed (will use CGO_ENABLED=0)${NC}"
+            }
+            
             # Set up storage access
             if [[ ! -d "$HOME/storage" ]]; then
                 echo -e "${BLUE}[*] Setting up storage access...${NC}"
